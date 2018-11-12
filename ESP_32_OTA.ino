@@ -1,46 +1,215 @@
+//-----------------CONFIGURATION------------------
+
+#define OTA
+#define MQTT
+#define DEBUG
+#define WORK // or HOME
+#define DEEPSLEEP
+
+//------------------------------------------------
+
+#if defined ESP8266
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <ESP8266httpUpdate.h>
+#else
 #include <WiFi.h>
 #include <Update.h>
+//#define D1 5
+#endif
+
 #include <Credentials\Credentials.h>
-#include "EEPROM.h"
 
-// Name of firmware
+#ifdef OTA
+#include "EEPROM.h" //For storing MD5 for OTA
+#endif
+
+WiFiClient espClient;
+
+unsigned long reconnectionPeriod = 10000; //miliseconds
+unsigned long lastWifiConnectionAttempt = 0;
+
+
+#ifdef MQTT
+#include <PubSubClient.h>
+//-----------------MQTT -------------------
+#ifdef HOME
+const char* mqtt_server = SERVER_IP;
+#else
+const char* mqtt_server = SERVER_IP_1;
+#endif
+unsigned long lastBrokerConnectionAttempt = 0;
+
+
+PubSubClient client(espClient);
+long lastTempMsg = 0;
+char msg[50];
+int sensorRequestPeriod = 10000; // seconds
+const int RELAY_PIN = 0; //GPIO 0 or D3
+#endif
+
+#ifdef OTA
+	//-----------------HTTP_OTA------------------------
+
+	/* Over The Air automatic firmware update from a web server.  ESP8266 will contact the
+	*  server on every boot and check for a firmware update.  If available, the update will
+	*  be downloaded and installed.  Server can determine the appropriate firmware for this
+	*  device from combination of HTTP_OTA_FIRMWARE and firmware MD5 checksums.
+	*/
+
+	// Name of firmware
 #define HTTP_OTA_FIRMWARE String(String(__FILE__).substring(String(__FILE__).lastIndexOf('\\')) + ".bin").substring(1)
-#define EEPROM_SIZE 1024
 
-WiFiClient client;
-
-// Variables to validate response
+#if defined ESP8266
+		//TODO Add ESP8266 code here
+#else
+		// Variables to validate response
 int contentLength = 0;
 bool isValidContentType = false;
 bool isNewFirmware = false;
-String MD5;
+int port = HTTP_OTA_PORT;
+String binPath = String(HTTP_OTA_PATH) + HTTP_OTA_FIRMWARE;
 
-// Your SSID and PSWD that the chip needs to connect to
+String MD5;
+int EEPROM_SIZE = 1024;
+int MD5_address = 0; // in EEPROM
+#endif	
+#endif
+
+#ifdef HOME
+	// Your SSID and PSWD that the chip needs to connect to
+const char* _SSID = SSID;
+const char* _PSWD = PASSWORD;
+String host = SERVER_IP;
+#else
+	// Your SSID and PSWD that the chip needs to connect to
 const char* _SSID = SSID_1;
 const char* _PSWD = PASSWORD_1;
-
-
 String host = SERVER_IP_1;
-int port = HTTP_OTA_PORT;
-String bin = String(HTTP_ESP32_OTA_PATH) + HTTP_OTA_FIRMWARE;
-int MD5_address = 0;
+#endif
 
+
+#ifdef DEEPSLEEP
+int sleepPeriod = 60; // Seconds
+#endif
+
+
+
+void setup() {
+	Serial.begin(115200);
+	delay(100);
+	setup_wifi();
+#ifdef OTA
+	// Execute OTA Update
+
+#if defined ESP8266
+	//TODO Add ESP8266 code here
+#else
+	checkEEPROM();
+	delay(100);
+	execOTA();
+#endif
+#endif
+
+#ifdef MQTT
+	client.setServer(mqtt_server, 1883);
+	client.setCallback(callback);
+	connectToBroker();
+#endif
+
+#ifdef DEEPSLEEP
+	sendMessageToMqttOnce();
+	sleep(sleepPeriod);
+#endif
+
+}
+
+void reconnectWifi() {
+	long now = millis();
+	if (now - lastWifiConnectionAttempt > reconnectionPeriod) {
+		lastWifiConnectionAttempt = now;
+		setup_wifi();
+	}
+}
+
+void setup_wifi() {
+	// We start by connecting to a WiFi network
+#ifdef DEBUG
+	Serial.print(F("Connecting to "));
+	Serial.println(_SSID);
+#endif
+	WiFi.begin(_SSID, _PSWD);
+	delay(3000);
+
+	if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+#ifdef DEBUG
+		Serial.println(F("Connection Failed!"));
+#endif
+		return;
+	}
+}
+
+#ifdef OTA
+#if defined ESP8266
+//TODO Add ESP8266 code here
+#else
 // Utility to extract header value from headers
 String getHeaderValue(String header, String headerName) {
 	return header.substring(strlen(headerName.c_str()));
 }
 
-// OTA Logic 
+// Used for storing of MD5 hash
+void checkEEPROM() {
+	if (!EEPROM.begin(EEPROM_SIZE)) {
+#ifdef DEBUG
+		Serial.println("Failed to initialise EEPROM");
+		Serial.println("Restarting...");
+#endif
+		delay(1000);
+		ESP.restart();
+	}
+}
+
+void saveMD5toEEPROM() {
+#ifdef DEBUG
+	Serial.println("Writing MD5 to EEPROM : " + MD5);
+#endif
+	EEPROM.writeString(MD5_address, MD5);
+	EEPROM.commit();
+#ifdef DEBUG
+	if (EEPROM.readString(MD5_address) == MD5)
+	{
+		Serial.println("Successfully written MD5 to EEPROM : " + EEPROM.readString(MD5_address));
+	}
+	else
+	{
+		Serial.println("Failed to write MD5 to EEPROM : " + MD5);
+		Serial.println("MD5 in EEPROM : " + EEPROM.readString(MD5_address));
+	}
+#endif
+}
+
+String loadMD5FromEEPROM() {
+#ifdef DEBUG
+	Serial.println("Loaded MD5 from EEPROM : " + EEPROM.readString(MD5_address));
+#endif
+	return EEPROM.readString(MD5_address);
+}
+
+// OTA Logic ESP-32
 void execOTA() {
+#ifdef DEBUG
 	Serial.println("Connecting to: " + String(host));
+#endif
 	// Connect to S3
-	if (client.connect(host.c_str(), port)) {
+	if (espClient.connect(host.c_str(), port)) {
 		// Connection Succeed.
 		// Fecthing the bin
-		Serial.println("Fetching Bin: " + String(bin));
-
+#ifdef DEBUG
+		Serial.println("Fetching Bin: " + String(binPath));
+#endif
 		// Get the contents of the bin file
-		client.print(String("GET ") + bin + " HTTP/1.1\r\n" +
+		espClient.print(String("GET ") + binPath + " HTTP/1.1\r\n" +
 			"Host: " + host + "\r\n" +
 			"Cache-Control: no-cache\r\n" +
 			"User-agent: esp-32\r\n" +
@@ -48,21 +217,24 @@ void execOTA() {
 			"Connection: close\r\n\r\n");
 
 		unsigned long timeout = millis();
-		while (client.available() == 0) {
+		while (espClient.available() == 0) {
 			if (millis() - timeout > 5000) {
+#ifdef DEBUG
 				Serial.println("Client Timeout !");
-				client.stop();
+#endif
+				espClient.stop();
 				return;
 			}
 		}
 
-		while (client.available()) {
+		while (espClient.available()) {
 			// read line till /n
-			String line = client.readStringUntil('\n');
+			String line = espClient.readStringUntil('\n');
 			// remove space, to check if the line is end of headers
 			line.trim();
+#ifdef DEBUG
 			Serial.println(line);
-
+#endif
 			// if the the line is empty,
 			// this is end of headers
 			// break the while and feed the
@@ -77,7 +249,9 @@ void execOTA() {
 			// else break and Exit Update
 			if (line.startsWith("HTTP/1.1")) {
 				if (line.indexOf("200") < 0) {
+#ifdef DEBUG
 					Serial.println("Got a non 200 status code from server. Exiting OTA Update.");
+#endif
 					break;
 				}
 			}
@@ -86,13 +260,17 @@ void execOTA() {
 			// Start with content length
 			if (line.startsWith("Content-Length: ")) {
 				contentLength = atoi((getHeaderValue(line, "Content-Length: ")).c_str());
+#ifdef DEBUG
 				Serial.println("Got " + String(contentLength) + " bytes from server");
+#endif
 			}
 
 			// Next, the content type
 			if (line.startsWith("Content-Type: ")) {
 				String contentType = getHeaderValue(line, "Content-Type: ");
+#ifdef DEBUG
 				Serial.println("Got " + contentType + " payload.");
+#endif
 				if (contentType == "application/octet-stream") {
 					isValidContentType = true;
 				}
@@ -100,9 +278,11 @@ void execOTA() {
 			// Get MD5 from response and compare with stored MD5
 			if (line.startsWith("md5: ")) {
 				MD5 = getHeaderValue(line, "md5: ");
+#ifdef DEBUG
 				Serial.println("Got md5 from response : " + MD5);
 				Serial.print("Size of md5 : ");
 				Serial.println(sizeof(MD5));
+#endif
 				if (!MD5.equals(loadMD5FromEEPROM()) && sizeof(MD5) > 10) {
 					isNewFirmware = true;
 				}
@@ -117,15 +297,19 @@ void execOTA() {
 		// Connect to S3 failed
 		// May be try?
 		// Probably a choppy network?
+#ifdef DEBUG
 		Serial.println("Connection to " + String(host) + " failed. Please check your setup");
+#endif
 		// retry??
 		// execOTA();
 	}
 
 	// Check what is the contentLength and if content type is `application/octet-stream`
+#ifdef DEBUG
 	Serial.println("contentLength : " + String(contentLength));
 	Serial.println("isValidContentType : " + String(isValidContentType));
 	Serial.println("isNewFirmware : " + String(isNewFirmware));
+#endif
 	// check contentLength and content type
 	if (contentLength && isValidContentType) {
 		if (isNewFirmware)
@@ -135,11 +319,13 @@ void execOTA() {
 
 			// If yes, begin
 			if (canBegin) {
+#ifdef DEBUG
 				Serial.println("Begin OTA. This may take 2 - 5 mins to complete. Things might be quite for a while.. Patience!");
+#endif
 				// No activity would appear on the Serial monitor
 				// So be patient. This may take 2 - 5mins to complete
-				size_t written = Update.writeStream(client);
-
+				size_t written = Update.writeStream(espClient);
+#ifdef DEBUG
 				if (written == contentLength) {
 					Serial.println("Written : " + String(written) + " successfully");
 				}
@@ -148,93 +334,183 @@ void execOTA() {
 					// retry??
 					// execOTA();
 				}
-
+#endif
 				if (Update.end()) {
+#ifdef DEBUG
 					Serial.println("OTA done!");
+#endif
 					if (Update.isFinished()) {
+#ifdef DEBUG
 						Serial.println("Update successfully completed. Rebooting.");
+#endif
 						saveMD5toEEPROM();
 						ESP.restart();
 					}
 					else {
+#ifdef DEBUG
 						Serial.println("Update not finished? Something went wrong!");
+#endif
 					}
 				}
 				else {
+#ifdef DEBUG
 					Serial.println("Error Occurred. Error #: " + String(Update.getError()));
+#endif
 				}
 			}
 			else {
 				// not enough space to begin OTA
 				// Understand the partitions and
 				// space availability
+#ifdef DEBUG
 				Serial.println("Not enough space to begin OTA");
-				client.flush();
+#endif
+				espClient.flush();
 			}
 		}
 		else
 		{
+#ifdef DEBUG
 			Serial.println("There is no new firmware");
-			client.flush();
+#endif
+			espClient.flush();
 		}
 	}
 	else {
+#ifdef DEBUG
 		Serial.println("There was no content in the response");
-		client.flush();
+#endif
+		espClient.flush();
+	}
+}
+#endif
+#endif
+
+#ifdef MQTT
+void callback(char* topic, byte* payload, unsigned int length) {
+#ifdef DEBUG
+	Serial.print("Message arrived [");
+	Serial.print(topic);
+	Serial.print("] ");
+	for (int i = 0; i < length; i++) {
+		Serial.print((char)payload[i]);
+	}
+	Serial.println("-----");
+#endif
+	if (strcmp(topic, "Battery/relay_1") == 0) {
+		//Switch on the RELAY if an 1 was received as first character
+		if ((char)payload[0] == '1') {
+			digitalWrite(RELAY_PIN, LOW);   // Turn the RELAY on
+		}
+		if ((char)payload[0] == '0') {
+			digitalWrite(RELAY_PIN, HIGH);  // Turn the RELAY off
+		}
+	}
+	if (strcmp(topic, "Battery/sensorRequestPeriod") == 0) {
+		String myString = String((char*)payload);
+		sensorRequestPeriod = myString.toInt();
+#ifdef DEBUG
+		Serial.println(myString);
+		Serial.print("Sensor request period set to :");
+		Serial.print(sensorRequestPeriod);
+		Serial.println(" seconds");
+#endif
 	}
 }
 
-void setup() {
-	Serial.begin(115200);
-	checkEEPROM();
-	delay(100);
-	Serial.println("Connecting to " + String(_SSID));
-
-	// Connect to provided SSID and PSWD
-	WiFi.begin(_SSID, _PSWD);
-
-	// Wait for connection to establish
-	while (WiFi.status() != WL_CONNECTED) {
-		Serial.print("."); // Keep the serial monitor lit!
-		delay(500);
+//Connection to MQTT broker
+void connectToBroker() {
+#ifdef DEBUG
+	Serial.print("Attempting MQTT connection...");
+#endif
+	// Attempt to connect
+	if (client.connect("Battery")) {
+#ifdef DEBUG
+		Serial.println("connected");
+#endif
+		// Once connected, publish an announcement...
+		client.publish("Battery/status", "Battery connected");
+		// ... and resubscribe
+		client.subscribe("Battery/relay_1");
+		client.subscribe("Battery/sensorRequestPeriod");
 	}
-
-	// Connection Succeed
-	Serial.println("");
-	Serial.println("Connected to " + String(_SSID));
-	// Execute OTA Update
-	execOTA();
-}
-
-void checkEEPROM() {
-	if (!EEPROM.begin(EEPROM_SIZE)) {
-		Serial.println("Failed to initialise EEPROM");
-		Serial.println("Restarting...");
-		delay(1000);
-		ESP.restart();
+	else {
+#ifdef DEBUG
+		Serial.print("failed, rc=");
+		Serial.print(client.state());
+		Serial.println(" try again in 60 seconds");
+#endif
 	}
 }
 
-void saveMD5toEEPROM() {
-	Serial.println("Writing MD5 to EEPROM : " + MD5);
-	EEPROM.writeString(MD5_address, MD5);
-	EEPROM.commit();
-	if (EEPROM.readString(MD5_address) == MD5)
-	{
-		Serial.println("Successfully written MD5 to EEPROM : " + EEPROM.readString(MD5_address));
-	}
-	else
-	{
-		Serial.println("Failed to write MD5 to EEPROM : " + MD5);
-		Serial.println("MD5 in EEPROM : " + EEPROM.readString(MD5_address));
+void reconnectToBroker() {
+	long now = millis();
+	if (now - lastBrokerConnectionAttempt > reconnectionPeriod) {
+		lastBrokerConnectionAttempt = now;
+		{
+			if (WiFi.status() == WL_CONNECTED)
+			{
+				if (!client.connected()) {
+					connectToBroker();
+				}
+			}
+			else
+			{
+				reconnectWifi();
+			}
+		}
 	}
 }
 
-String loadMD5FromEEPROM() {
-	Serial.println("Loaded MD5 from EEPROM : " + EEPROM.readString(MD5_address));
-	return EEPROM.readString(MD5_address);
+void sendMessageToMqtt() {
+#ifdef DEBUG
+	Serial.print("Publish message busVoltage: ");
+	Serial.println("555.55");
+#endif
+	client.publish("Battery/busVoltage", "555.55");
 }
+
+void getSensorData() {
+
+#ifdef DEBUG
+	Serial.print("Bus voltage:   ");
+	Serial.print("555.55");
+	Serial.println(" V");
+#endif
+}
+
+void sendMessageToMqttInLoop() {
+	long now = millis();
+	if (now - lastTempMsg > sensorRequestPeriod) {
+		lastTempMsg = now;
+		getSensorData();
+		sendMessageToMqtt();
+	}
+}
+
+void sendMessageToMqttOnce() {
+	getSensorData();
+	sendMessageToMqtt();
+}
+#endif
+
+#ifdef DEEPSLEEP
+void sleep(int sleepTimeInSeconds) {
+#ifdef DEBUG
+	Serial.print("Go to deep sleep");
+#endif
+	ESP.deepSleep(sleepTimeInSeconds * 1000000);
+}
+#endif
+
 
 void loop() {
-	// chill
+#ifdef MQTT
+	if (!client.connected()) {
+		reconnectToBroker();
+	}
+	client.loop();
+	sendMessageToMqttInLoop();
+#endif
 }
+
