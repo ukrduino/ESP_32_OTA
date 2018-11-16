@@ -4,24 +4,17 @@
 #define MQTT
 #define DEBUG
 #define WORK // or HOME
-#define DEEPSLEEP
+//#define DEEPSLEEP
 
 //------------------------------------------------
 
-#if defined ESP8266
-#include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
-#include <ESP8266httpUpdate.h>
-#else
-#include <WiFi.h>
-#include <Update.h>
-//#define D1 5
-#endif
 
+#include <WiFi.h>
 #include <Credentials\Credentials.h>
 
 #ifdef OTA
 #include "EEPROM.h" //For storing MD5 for OTA
+#include <Update.h>
 #endif
 
 WiFiClient espClient;
@@ -38,20 +31,19 @@ const char* mqtt_server = SERVER_IP;
 #else
 const char* mqtt_server = SERVER_IP_1;
 #endif
-unsigned long lastBrokerConnectionAttempt = 0;
-
 
 PubSubClient client(espClient);
+unsigned long lastBrokerConnectionAttempt = 0;
 long lastTempMsg = 0;
 char msg[50];
-int sensorRequestPeriod = 10000; // seconds
+int sensorRequestPeriod = 10; // seconds
 const int RELAY_PIN = 0; //GPIO 0 or D3
 #endif
 
 #ifdef OTA
 	//-----------------HTTP_OTA------------------------
 
-	/* Over The Air automatic firmware update from a web server.  ESP8266 will contact the
+	/* Over The Air automatic firmware update from a web server.  ESP32 will contact the
 	*  server on every boot and check for a firmware update.  If available, the update will
 	*  be downloaded and installed.  Server can determine the appropriate firmware for this
 	*  device from combination of HTTP_OTA_FIRMWARE and firmware MD5 checksums.
@@ -60,10 +52,7 @@ const int RELAY_PIN = 0; //GPIO 0 or D3
 	// Name of firmware
 #define HTTP_OTA_FIRMWARE String(String(__FILE__).substring(String(__FILE__).lastIndexOf('\\')) + ".bin").substring(1)
 
-#if defined ESP8266
-		//TODO Add ESP8266 code here
-#else
-		// Variables to validate response
+// Variables to validate response
 int contentLength = 0;
 bool isValidContentType = false;
 bool isNewFirmware = false;
@@ -73,7 +62,6 @@ String binPath = String(HTTP_OTA_PATH) + HTTP_OTA_FIRMWARE;
 String MD5;
 int EEPROM_SIZE = 1024;
 int MD5_address = 0; // in EEPROM
-#endif	
 #endif
 
 #ifdef HOME
@@ -81,13 +69,13 @@ int MD5_address = 0; // in EEPROM
 const char* _SSID = SSID;
 const char* _PSWD = PASSWORD;
 String host = SERVER_IP;
+
 #else
 	// Your SSID and PSWD that the chip needs to connect to
 const char* _SSID = SSID_1;
 const char* _PSWD = PASSWORD_1;
 String host = SERVER_IP_1;
 #endif
-
 
 #ifdef DEEPSLEEP
 int sleepPeriod = 60; // Seconds
@@ -100,15 +88,9 @@ void setup() {
 	delay(100);
 	setup_wifi();
 #ifdef OTA
-	// Execute OTA Update
-
-#if defined ESP8266
-	//TODO Add ESP8266 code here
-#else
 	checkEEPROM();
 	delay(100);
 	execOTA();
-#endif
 #endif
 
 #ifdef MQTT
@@ -150,9 +132,7 @@ void setup_wifi() {
 }
 
 #ifdef OTA
-#if defined ESP8266
-//TODO Add ESP8266 code here
-#else
+
 // Utility to extract header value from headers
 String getHeaderValue(String header, String headerName) {
 	return header.substring(strlen(headerName.c_str()));
@@ -384,7 +364,6 @@ void execOTA() {
 	}
 }
 #endif
-#endif
 
 #ifdef MQTT
 void callback(char* topic, byte* payload, unsigned int length) {
@@ -395,7 +374,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 	for (int i = 0; i < length; i++) {
 		Serial.print((char)payload[i]);
 	}
-	Serial.println("-----");
+	Serial.println("");
 #endif
 	if (strcmp(topic, "Battery/relay_1") == 0) {
 		//Switch on the RELAY if an 1 was received as first character
@@ -405,6 +384,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
 		if ((char)payload[0] == '0') {
 			digitalWrite(RELAY_PIN, HIGH);  // Turn the RELAY off
 		}
+	}
+	if (strcmp(topic, "Battery/restart") == 0) {
+		//Restart ESP to update flash
+		ESP.restart();
 	}
 	if (strcmp(topic, "Battery/sensorRequestPeriod") == 0) {
 		String myString = String((char*)payload);
@@ -433,6 +416,7 @@ void connectToBroker() {
 		// ... and resubscribe
 		client.subscribe("Battery/relay_1");
 		client.subscribe("Battery/sensorRequestPeriod");
+		client.subscribe("Battery/restart");
 	}
 	else {
 #ifdef DEBUG
@@ -481,7 +465,7 @@ void getSensorData() {
 
 void sendMessageToMqttInLoop() {
 	long now = millis();
-	if (now - lastTempMsg > sensorRequestPeriod) {
+	if (now - lastTempMsg > sensorRequestPeriod * 1000) {
 		lastTempMsg = now;
 		getSensorData();
 		sendMessageToMqtt();
